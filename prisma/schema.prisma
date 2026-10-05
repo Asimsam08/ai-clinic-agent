@@ -1,0 +1,684 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Clinic {
+  id       String  @id @default(uuid())
+  name     String
+  slug     String  @unique
+  phone    String?
+  email    String?
+  timezone String  @default("Asia/Kolkata")
+  address  String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members                ClinicMember[]
+  whatsappAccounts       WhatsAppAccount[]
+  contacts               Contact[]
+  conversations          Conversation[]
+  services               Service[]
+  staff                  Staff[]
+  workingHours           WorkingHour[]
+  availabilityExceptions AvailabilityException[]
+  appointments           Appointment[]
+  knowledgeDocuments     KnowledgeDocument[]
+  workflows              Workflow[]
+  campaigns              Campaign[]
+  messageTemplates       MessageTemplate[]
+  humanTasks             HumanTask[]
+  agentRuns              AgentRun[]
+  webhookEvents          WebhookEvent[]
+  auditLogs              AuditLog[]
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+model User {
+  id           String     @id @default(uuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships ClinicMember[]
+}
+
+enum ClinicRole {
+  OWNER
+  ADMIN
+  STAFF
+}
+
+model ClinicMember {
+  id       String     @id @default(uuid())
+  userId   String
+  clinicId String
+  role     ClinicRole
+
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, clinicId])
+  @@index([clinicId])
+}
+
+model WhatsAppAccount {
+  id       String @id @default(uuid())
+  clinicId String
+
+  wabaId        String  @unique
+  phoneNumberId String  @unique
+  businessPhone String
+  displayName   String?
+
+  accessTokenEncrypted String
+  isActive             Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic        Clinic         @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+  webhookEvents WebhookEvent[]
+
+  @@index([clinicId])
+}
+
+enum ContactType {
+  PATIENT
+  LEAD
+  CUSTOMER
+}
+
+model Contact {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name  String?
+  phone String
+  email String?
+  type  ContactType @default(PATIENT)
+
+  whatsappOptIn Boolean   @default(false)
+  totalSpent    Decimal   @default(0)
+  lastVisitAt   DateTime?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic             Clinic              @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  conversations      Conversation[]
+  appointments       Appointment[]
+  campaignRecipients CampaignRecipient[]
+
+  @@unique([clinicId, phone])
+  @@index([clinicId])
+  @@index([clinicId, lastVisitAt])
+  @@index([clinicId, totalSpent])
+}
+
+model Staff {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name     String
+  title    String?
+  phone    String?
+  email    String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+
+  @@index([clinicId])
+}
+
+model Service {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name            String
+  description     String?
+  durationMinutes Int
+  price           Decimal?
+  isActive        Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic       Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+
+  @@index([clinicId])
+}
+
+model WorkingHour {
+  id       String @id @default(uuid())
+  clinicId String
+
+  dayOfWeek Int
+  openTime  String
+  closeTime String
+  isClosed  Boolean @default(false)
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@unique([clinicId, dayOfWeek])
+}
+
+model AvailabilityException {
+  id       String @id @default(uuid())
+  clinicId String
+
+  date      DateTime
+  isClosed  Boolean  @default(false)
+  openTime  String?
+  closeTime String?
+  reason    String?
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId, date])
+}
+
+enum Channel {
+  SIMULATOR
+  WHATSAPP
+}
+
+enum ConversationStatus {
+  ACTIVE
+  WAITING_FOR_HUMAN
+  CLOSED
+}
+
+model Conversation {
+  id                String  @id @default(uuid())
+  clinicId          String
+  contactId         String
+  whatsappAccountId String?
+
+  channel Channel
+  status  ConversationStatus @default(ACTIVE)
+
+  state         Json?
+  lastMessageAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic          Clinic           @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  contact         Contact          @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  whatsappAccount WhatsAppAccount? @relation(fields: [whatsappAccountId], references: [id], onDelete: SetNull)
+
+  messages   Message[]
+  agentRuns  AgentRun[]
+  humanTasks HumanTask[]
+
+  @@index([clinicId, contactId])
+  @@index([clinicId, status])
+  @@index([clinicId, lastMessageAt])
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum SenderType {
+  CUSTOMER
+  OWNER
+  ADMIN
+  AI
+  SYSTEM
+}
+
+model Message {
+  id             String @id @default(uuid())
+  conversationId String
+
+  direction  MessageDirection
+  senderType SenderType
+  content    String?
+
+  externalMessageId String? @unique
+  metadata          Json?
+
+  createdAt DateTime @default(now())
+
+  conversation Conversation   @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  media        MessageMedia[]
+
+  @@index([conversationId, createdAt])
+}
+
+enum MediaType {
+  IMAGE
+  AUDIO
+  VIDEO
+  DOCUMENT
+}
+
+model MessageMedia {
+  id        String @id @default(uuid())
+  messageId String
+
+  type       MediaType
+  storageUrl String
+  mimeType   String?
+  fileName   String?
+  fileSize   Int?
+
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+model Appointment {
+  id        String  @id @default(uuid())
+  clinicId  String
+  contactId String
+  staffId   String?
+  serviceId String
+
+  startAt DateTime
+  endAt   DateTime
+  status  AppointmentStatus @default(PENDING)
+
+  notes  String?
+  source String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic  Clinic  @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  staff   Staff?  @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  statusHistory AppointmentStatusHistory[]
+
+  @@index([clinicId, startAt])
+  @@index([clinicId, contactId])
+  @@index([staffId, startAt])
+  @@index([clinicId, status])
+}
+
+model AppointmentStatusHistory {
+  id            String @id @default(uuid())
+  appointmentId String
+
+  fromStatus AppointmentStatus?
+  toStatus   AppointmentStatus
+  reason     String?
+
+  createdAt DateTime @default(now())
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId, createdAt])
+}
+
+enum DocumentStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+model KnowledgeDocument {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name       String
+  sourceType String
+  storageUrl String?
+  status     DocumentStatus @default(PROCESSING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic Clinic           @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  chunks KnowledgeChunk[]
+
+  @@index([clinicId, status])
+}
+
+model KnowledgeChunk {
+  id         String @id @default(uuid())
+  documentId String
+
+  content    String
+  chunkIndex Int
+  vectorId   String?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  document KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+}
+
+enum AgentType {
+  CUSTOMER
+  OWNER
+}
+
+enum AgentRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  WAITING_HUMAN
+}
+
+model AgentRun {
+  id             String    @id @default(uuid())
+  clinicId       String
+  conversationId String
+  agentType      AgentType
+
+  status AgentRunStatus @default(RUNNING)
+  input  Json?
+  output Json?
+  error  String?
+
+  model        String?
+  inputTokens  Int?
+  outputTokens Int?
+  latencyMs    Int?
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  clinic       Clinic       @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  toolCalls    ToolCall[]
+
+  @@index([clinicId, startedAt])
+  @@index([conversationId, startedAt])
+}
+
+enum ToolCallStatus {
+  STARTED
+  SUCCESS
+  FAILED
+}
+
+model ToolCall {
+  id         String @id @default(uuid())
+  agentRunId String
+
+  toolName  String
+  arguments Json?
+  result    Json?
+  status    ToolCallStatus @default(STARTED)
+  error     String?
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@index([agentRunId])
+  @@index([toolName, startedAt])
+}
+
+enum HumanTaskStatus {
+  PENDING
+  CLAIMED
+  RESOLVED
+  REJECTED
+}
+
+model HumanTask {
+  id             String @id @default(uuid())
+  clinicId       String
+  conversationId String
+
+  type   String
+  reason String
+  status HumanTaskStatus @default(PENDING)
+
+  payload    Json?
+  resolution Json?
+
+  assignedToId String?
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  clinic       Clinic       @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId, status])
+  @@index([conversationId])
+}
+
+model Workflow {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name        String
+  description String?
+  isActive    Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic   Clinic            @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  versions WorkflowVersion[]
+  runs     WorkflowRun[]
+
+  @@index([clinicId])
+}
+
+model WorkflowVersion {
+  id         String @id @default(uuid())
+  workflowId String
+
+  version     Int
+  definition  Json
+  isPublished Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, version])
+}
+
+enum WorkflowRunStatus {
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model WorkflowRun {
+  id                String @id @default(uuid())
+  workflowId        String
+  workflowVersionId String
+
+  status WorkflowRunStatus @default(RUNNING)
+  state  Json?
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  workflow Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId, status])
+}
+
+enum TemplateStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model MessageTemplate {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name     String
+  language String
+  category String
+
+  content    String
+  providerId String?
+  status     TemplateStatus @default(DRAFT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@unique([clinicId, name, language])
+}
+
+enum CampaignStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  SENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Campaign {
+  id       String @id @default(uuid())
+  clinicId String
+
+  name        String
+  description String?
+  status      CampaignStatus @default(DRAFT)
+
+  segment Json?
+  message String?
+
+  scheduledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clinic     Clinic              @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  recipients CampaignRecipient[]
+
+  @@index([clinicId, status])
+  @@index([clinicId, scheduledAt])
+}
+
+enum CampaignRecipientStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model CampaignRecipient {
+  id         String @id @default(uuid())
+  campaignId String
+  contactId  String
+
+  status              CampaignRecipientStatus @default(PENDING)
+  messageId           String?
+  personalizedMessage String?
+  error               String?
+
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  readAt      DateTime?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact  Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status])
+}
+
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+}
+
+model WebhookEvent {
+  id                String  @id @default(uuid())
+  clinicId          String?
+  whatsappAccountId String?
+
+  externalEventId String        @unique
+  eventType       String
+  payload         Json
+  status          WebhookStatus @default(RECEIVED)
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  error       String?
+
+  clinic          Clinic?          @relation(fields: [clinicId], references: [id], onDelete: SetNull)
+  whatsappAccount WhatsAppAccount? @relation(fields: [whatsappAccountId], references: [id], onDelete: SetNull)
+
+  @@index([clinicId, receivedAt])
+  @@index([status])
+}
+
+model AuditLog {
+  id       String @id @default(uuid())
+  clinicId String
+
+  actorType  String
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId, createdAt])
+  @@index([clinicId, entityType, entityId])
+}
