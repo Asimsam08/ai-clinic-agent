@@ -319,7 +319,7 @@ model Appointment {
   startAt DateTime
   endAt   DateTime
   status  AppointmentStatus @default(PENDING)
-
+  confirmationExpiresAt DateTime?
   notes  String?
   source String?
 

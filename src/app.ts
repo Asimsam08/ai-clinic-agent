@@ -6,6 +6,8 @@ import clinicRoutes from "./routes/clinic.routes.js";
 import servicesRoutes from "./routes/services.routes.js";
 import staffRoutes from "./routes/staff.routes.js";
 import workingHoursRoutes from "./routes/working-hours.routes.js";
+import appointmentRoutes from "./routes/appointment.routes.js";
+import contactRoutes from "./routes/contact.routes.js";
 
 import { errorMiddleware } from "./middleware/error.middleware.js";
 
@@ -29,5 +31,7 @@ app.use("/api/clinic", clinicRoutes);
 app.use("/api/services", servicesRoutes);
 app.use("/api/staff", staffRoutes);
 app.use("/api/working-hours", workingHoursRoutes);
+app.use("/api/appointments", appointmentRoutes);
+app.use("/api/contacts", contactRoutes);
 app.use(errorMiddleware);
 export default app;

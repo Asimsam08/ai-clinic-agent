@@ -1,6 +1,7 @@
 import { prisma } from "../db/prisma.js";
 import { AppError } from "../utils/app.error.js";
-import { fromZonedTime } from "date-fns-tz";
+import { fromZonedTime, formatInTimeZone } from "date-fns-tz";
+
 
 interface AvailabilityInput {
   clinicId: string;
@@ -8,6 +9,17 @@ interface AvailabilityInput {
   serviceId: string;
   staffId?: string;
 }
+
+interface CreateAppointmentInput {
+  clinicId: string;
+  contactId: string;
+  serviceId: string;
+  staffId: string;
+  startAt: string;
+  notes?: string;
+  source?: string;
+}
+
 
 const SLOT_INTERVAL_MINUTES = 15;
 
@@ -248,4 +260,244 @@ export async function getAvailableSlots(input: AvailabilityInput) {
     },
     slots,
   };
+}
+
+
+const MAX_TRANSACTION_ATTEMPTS = 3;
+
+function isSerializationConflict(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "P2034"
+  );
+}
+
+export async function createAppointment(
+  input: CreateAppointmentInput
+) {
+  const {
+    clinicId,
+    contactId,
+    serviceId,
+    staffId,
+    startAt: requestedStartAt,
+    notes,
+    source,
+  } = input;
+
+  // 1. Validate the requested start time.
+  const startAt = new Date(requestedStartAt);
+
+  if (
+    !Number.isFinite(startAt.getTime()) ||
+    !requestedStartAt.includes("T") ||
+    !/(Z|[+-]\d{2}:\d{2})$/i.test(requestedStartAt)
+  ) {
+    throw new AppError(
+      "startAt must be a valid ISO datetime with a timezone",
+      400
+    );
+  }
+
+  // 2. Get the clinic timezone.
+  const clinic = await prisma.clinic.findFirst({
+    where: {
+      id: clinicId,
+      isActive: true,
+    },
+    select: {
+      timezone: true,
+    },
+  });
+
+  if (!clinic) {
+    throw new AppError("Clinic not found or inactive", 404);
+  }
+
+  // 3. Check whether the requested time is a valid,
+  // currently available candidate for this service and dentist.
+  const date = formatInTimeZone(
+    startAt,
+    clinic.timezone,
+    "yyyy-MM-dd"
+  );
+
+  const availability = await getAvailableSlots({
+    clinicId,
+    date,
+    serviceId,
+    staffId,
+  });
+
+  const selectedSlot = availability.slots.find(
+    (slot) =>
+      new Date(slot.startAt).getTime() === startAt.getTime() &&
+      slot.availableStaff.some((staff) => staff.id === staffId)
+  );
+
+  if (!selectedSlot) {
+    throw new AppError(
+      "The selected appointment slot is unavailable",
+      409
+    );
+  }
+
+  const endAt = new Date(
+    startAt.getTime() +
+      availability.service.durationMinutes * 60_000
+  );
+
+  // 4. Recheck important records and create the booking
+  // inside a serializable database transaction.
+  for (
+    let attempt = 1;
+    attempt <= MAX_TRANSACTION_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      return await prisma.$transaction(
+        async (tx) => {
+          const contact = await tx.contact.findFirst({
+            where: {
+              id: contactId,
+              clinicId,
+              type: "PATIENT",
+            },
+            select: { id: true },
+          });
+
+          if (!contact) {
+            throw new AppError(
+              "Patient contact not found in this clinic",
+              404
+            );
+          }
+
+          const service = await tx.service.findFirst({
+            where: {
+              id: serviceId,
+              clinicId,
+              isActive: true,
+            },
+            select: {
+              id: true,
+              durationMinutes: true,
+            },
+          });
+
+          if (!service) {
+            throw new AppError(
+              "Active service not found",
+              404
+            );
+          }
+
+          if (
+            service.durationMinutes !==
+            availability.service.durationMinutes
+          ) {
+            throw new AppError(
+              "Service details changed. Check availability again.",
+              409
+            );
+          }
+
+          const staff = await tx.staff.findFirst({
+            where: {
+              id: staffId,
+              clinicId,
+              isActive: true,
+            },
+            select: { id: true },
+          });
+
+          if (!staff) {
+            throw new AppError(
+              "Active staff member not found in this clinic",
+              404
+            );
+          }
+
+          // A booking conflicts if the existing appointment
+          // starts before our end AND ends after our start.
+          const conflictingAppointment =
+            await tx.appointment.findFirst({
+              where: {
+                clinicId,
+                staffId,
+                status: {
+                  in: ["PENDING", "CONFIRMED"],
+                },
+                startAt: { lt: endAt },
+                endAt: { gt: startAt },
+              },
+              select: { id: true },
+            });
+
+          if (conflictingAppointment) {
+            throw new AppError(
+              "This dentist has already been booked for that time",
+              409
+            );
+          }
+
+          return tx.appointment.create({
+            data: {
+              clinicId,
+              contactId,
+              serviceId,
+              staffId,
+              startAt,
+              endAt,
+              notes,
+              source: source ?? "DASHBOARD",
+              status: "PENDING",
+            },
+            include: {
+              contact: {
+                select: {
+                  id: true,
+                  name: true,
+                  phone: true,
+                },
+              },
+              service: {
+                select: {
+                  id: true,
+                  name: true,
+                  durationMinutes: true,
+                },
+              },
+              staff: {
+                select: {
+                  id: true,
+                  name: true,
+                },
+              },
+            },
+          });
+        },
+        {
+          isolationLevel: "Serializable",
+        }
+      );
+    } catch (error) {
+      if (isSerializationConflict(error)) {
+        if (attempt < MAX_TRANSACTION_ATTEMPTS) {
+          continue;
+        }
+
+        throw new AppError(
+          "The appointment could not be reserved safely. Please check availability again.",
+          409
+        );
+      }
+
+      throw error;
+    }
+  }
+
+  throw new AppError("Unable to create appointment", 409);
 }
