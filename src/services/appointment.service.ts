@@ -2,7 +2,6 @@ import { prisma } from "../db/prisma.js";
 import { AppError } from "../utils/app.error.js";
 import { fromZonedTime, formatInTimeZone } from "date-fns-tz";
 
-
 interface AvailabilityInput {
   clinicId: string;
   date: string; // YYYY-MM-DD in the clinic's timezone
@@ -20,8 +19,8 @@ interface CreateAppointmentInput {
   source?: string;
 }
 
-
 const SLOT_INTERVAL_MINUTES = 15;
+const PENDING_HOLD_MINUTES = 15;
 
 export async function getAvailableSlots(input: AvailabilityInput) {
   const { clinicId, date, serviceId, staffId } = input;
@@ -76,10 +75,7 @@ export async function getAvailableSlots(input: AvailabilityInput) {
   }
 
   // Convert the requested clinic-local date to UTC boundaries.
-  const dayStart = fromZonedTime(
-    `${date}T00:00:00`,
-    clinic.timezone
-  );
+  const dayStart = fromZonedTime(`${date}T00:00:00`, clinic.timezone);
 
   const nextDate = new Date(calendarDate);
   nextDate.setUTCDate(nextDate.getUTCDate() + 1);
@@ -90,10 +86,7 @@ export async function getAvailableSlots(input: AvailabilityInput) {
     String(nextDate.getUTCDate()).padStart(2, "0"),
   ].join("-");
 
-  const dayEnd = fromZonedTime(
-    `${nextDateString}T00:00:00`,
-    clinic.timezone
-  );
+  const dayEnd = fromZonedTime(`${nextDateString}T00:00:00`, clinic.timezone);
 
   const dayOfWeek = calendarDate.getUTCDay();
 
@@ -169,33 +162,48 @@ export async function getAvailableSlots(input: AvailabilityInput) {
     };
   }
 
-  const openingTime = fromZonedTime(
-    `${date}T${openTime}:00`,
-    clinic.timezone
-  );
+  const openingTime = fromZonedTime(`${date}T${openTime}:00`, clinic.timezone);
 
-  const closingTime = fromZonedTime(
-    `${date}T${closeTime}:00`,
-    clinic.timezone
-  );
+  const closingTime = fromZonedTime(`${date}T${closeTime}:00`, clinic.timezone);
 
   if (closingTime <= openingTime) {
     throw new AppError("Invalid clinic opening hours", 500);
   }
 
   // Fetch appointments that overlap the clinic's operating window.
+  // const appointments = await prisma.appointment.findMany({
+  //   where: {
+  //     clinicId,
+  //     status: {
+  //       in: ["PENDING", "CONFIRMED"],
+  //     },
+  //     startAt: {
+  //       lt: closingTime,
+  //     },
+  //     endAt: {
+  //       gt: openingTime,
+  //     },
+  //     ...(staffId ? { staffId } : {}),
+  //   },
+  //   select: {
+  //     staffId: true,
+  //     startAt: true,
+  //     endAt: true,
+  //   },
+  // });
+  const now = new Date();
   const appointments = await prisma.appointment.findMany({
     where: {
       clinicId,
-      status: {
-        in: ["PENDING", "CONFIRMED"],
-      },
-      startAt: {
-        lt: closingTime,
-      },
-      endAt: {
-        gt: openingTime,
-      },
+      OR: [
+        { status: "CONFIRMED" },
+        {
+          status: "PENDING",
+          confirmationExpiresAt: { gt: now },
+        },
+      ],
+      startAt: { lt: closingTime },
+      endAt: { gt: openingTime },
       ...(staffId ? { staffId } : {}),
     },
     select: {
@@ -234,10 +242,7 @@ export async function getAvailableSlots(input: AvailabilityInput) {
         }
 
         // Two intervals overlap when each starts before the other ends.
-        return (
-          appointment.startAt < endAt &&
-          appointment.endAt > startAt
-        );
+        return appointment.startAt < endAt && appointment.endAt > startAt;
       });
     });
 
@@ -262,7 +267,6 @@ export async function getAvailableSlots(input: AvailabilityInput) {
   };
 }
 
-
 const MAX_TRANSACTION_ATTEMPTS = 3;
 
 function isSerializationConflict(error: unknown): boolean {
@@ -274,9 +278,7 @@ function isSerializationConflict(error: unknown): boolean {
   );
 }
 
-export async function createAppointment(
-  input: CreateAppointmentInput
-) {
+export async function createAppointment(input: CreateAppointmentInput) {
   const {
     clinicId,
     contactId,
@@ -297,7 +299,7 @@ export async function createAppointment(
   ) {
     throw new AppError(
       "startAt must be a valid ISO datetime with a timezone",
-      400
+      400,
     );
   }
 
@@ -318,11 +320,7 @@ export async function createAppointment(
 
   // 3. Check whether the requested time is a valid,
   // currently available candidate for this service and dentist.
-  const date = formatInTimeZone(
-    startAt,
-    clinic.timezone,
-    "yyyy-MM-dd"
-  );
+  const date = formatInTimeZone(startAt, clinic.timezone, "yyyy-MM-dd");
 
   const availability = await getAvailableSlots({
     clinicId,
@@ -334,28 +332,20 @@ export async function createAppointment(
   const selectedSlot = availability.slots.find(
     (slot) =>
       new Date(slot.startAt).getTime() === startAt.getTime() &&
-      slot.availableStaff.some((staff) => staff.id === staffId)
+      slot.availableStaff.some((staff) => staff.id === staffId),
   );
 
   if (!selectedSlot) {
-    throw new AppError(
-      "The selected appointment slot is unavailable",
-      409
-    );
+    throw new AppError("The selected appointment slot is unavailable", 409);
   }
 
   const endAt = new Date(
-    startAt.getTime() +
-      availability.service.durationMinutes * 60_000
+    startAt.getTime() + availability.service.durationMinutes * 60_000,
   );
 
   // 4. Recheck important records and create the booking
   // inside a serializable database transaction.
-  for (
-    let attempt = 1;
-    attempt <= MAX_TRANSACTION_ATTEMPTS;
-    attempt++
-  ) {
+  for (let attempt = 1; attempt <= MAX_TRANSACTION_ATTEMPTS; attempt++) {
     try {
       return await prisma.$transaction(
         async (tx) => {
@@ -369,10 +359,7 @@ export async function createAppointment(
           });
 
           if (!contact) {
-            throw new AppError(
-              "Patient contact not found in this clinic",
-              404
-            );
+            throw new AppError("Patient contact not found in this clinic", 404);
           }
 
           const service = await tx.service.findFirst({
@@ -388,19 +375,15 @@ export async function createAppointment(
           });
 
           if (!service) {
-            throw new AppError(
-              "Active service not found",
-              404
-            );
+            throw new AppError("Active service not found", 404);
           }
 
           if (
-            service.durationMinutes !==
-            availability.service.durationMinutes
+            service.durationMinutes !== availability.service.durationMinutes
           ) {
             throw new AppError(
               "Service details changed. Check availability again.",
-              409
+              409,
             );
           }
 
@@ -416,34 +399,78 @@ export async function createAppointment(
           if (!staff) {
             throw new AppError(
               "Active staff member not found in this clinic",
-              404
+              404,
             );
           }
 
           // A booking conflicts if the existing appointment
           // starts before our end AND ends after our start.
-          const conflictingAppointment =
-            await tx.appointment.findFirst({
-              where: {
-                clinicId,
-                staffId,
-                status: {
-                  in: ["PENDING", "CONFIRMED"],
+
+          const now = new Date();
+
+          const conflictingAppointment = await tx.appointment.findFirst({
+            where: {
+              clinicId,
+              staffId,
+              OR: [
+                { status: "CONFIRMED" },
+                {
+                  status: "PENDING",
+                  confirmationExpiresAt: { gt: now },
                 },
-                startAt: { lt: endAt },
-                endAt: { gt: startAt },
-              },
-              select: { id: true },
-            });
+              ],
+              startAt: { lt: endAt },
+              endAt: { gt: startAt },
+            },
+            select: { id: true },
+          });
 
           if (conflictingAppointment) {
             throw new AppError(
               "This dentist has already been booked for that time",
-              409
+              409,
             );
           }
 
-          return tx.appointment.create({
+          // return tx.appointment.create({
+          //   data: {
+          //     clinicId,
+          //     contactId,
+          //     serviceId,
+          //     staffId,
+          //     startAt,
+          //     endAt,
+          //     notes,
+          //     source: source ?? "DASHBOARD",
+          //     status: "PENDING",
+          //   },
+          //   include: {
+          //     contact: {
+          //       select: {
+          //         id: true,
+          //         name: true,
+          //         phone: true,
+          //       },
+          //     },
+          //     service: {
+          //       select: {
+          //         id: true,
+          //         name: true,
+          //         durationMinutes: true,
+          //       },
+          //     },
+          //     staff: {
+          //       select: {
+          //         id: true,
+          //         name: true,
+          //       },
+          //     },
+          //   },
+          // });
+
+          const confirmationExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+          const appointment = await tx.appointment.create({
             data: {
               clinicId,
               contactId,
@@ -454,34 +481,36 @@ export async function createAppointment(
               notes,
               source: source ?? "DASHBOARD",
               status: "PENDING",
+              confirmationExpiresAt,
             },
             include: {
               contact: {
-                select: {
-                  id: true,
-                  name: true,
-                  phone: true,
-                },
+                select: { id: true, name: true, phone: true },
               },
               service: {
-                select: {
-                  id: true,
-                  name: true,
-                  durationMinutes: true,
-                },
+                select: { id: true, name: true, durationMinutes: true },
               },
               staff: {
-                select: {
-                  id: true,
-                  name: true,
-                },
+                select: { id: true, name: true },
               },
             },
           });
+
+          await tx.appointmentStatusHistory.create({
+            data: {
+              appointmentId: appointment.id,
+              fromStatus: null,
+              toStatus: "PENDING",
+              reason: "BOOKING_CREATED",
+            },
+          });
+
+          return appointment;
         },
+
         {
           isolationLevel: "Serializable",
-        }
+        },
       );
     } catch (error) {
       if (isSerializationConflict(error)) {
@@ -491,7 +520,7 @@ export async function createAppointment(
 
         throw new AppError(
           "The appointment could not be reserved safely. Please check availability again.",
-          409
+          409,
         );
       }
 
@@ -500,4 +529,134 @@ export async function createAppointment(
   }
 
   throw new AppError("Unable to create appointment", 409);
+}
+
+
+interface ConfirmPatientAppointmentInput {
+  clinicId: string;
+  contactId: string;
+  appointmentId: string;
+}
+
+export async function confirmPatientAppointment(
+  input: ConfirmPatientAppointmentInput,
+) {
+  const { clinicId, contactId, appointmentId } = input;
+
+  return prisma.$transaction(async (tx) => {
+    const appointment = await tx.appointment.findFirst({
+      where: {
+        id: appointmentId,
+        clinicId,
+        contactId,
+      },
+      select: {
+        id: true,
+        status: true,
+        confirmationExpiresAt: true,
+      },
+    });
+
+    if (!appointment) {
+      throw new AppError(
+        "Appointment not found for this patient and clinic",
+        404,
+      );
+    }
+
+    // Clicking Confirm again should not change the existing booking.
+    if (appointment.status === "CONFIRMED") {
+      return {
+        outcome: "ALREADY_CONFIRMED" as const,
+        appointmentId: appointment.id,
+      };
+    }
+
+    if (appointment.status !== "PENDING") {
+      throw new AppError(
+        `This appointment cannot be confirmed because its status is ${appointment.status}`,
+        409,
+      );
+    }
+
+    const now = new Date();
+    const hasExpired =
+      !appointment.confirmationExpiresAt ||
+      appointment.confirmationExpiresAt <= now;
+
+    if (hasExpired) {
+      const cancelled = await tx.appointment.updateMany({
+        where: {
+          id: appointment.id,
+          clinicId,
+          contactId,
+          status: "PENDING",
+          OR: [
+            { confirmationExpiresAt: { lte: now } },
+            { confirmationExpiresAt: null },
+          ],
+        },
+        data: {
+          status: "CANCELLED",
+        },
+      });
+
+      if (cancelled.count === 0) {
+        throw new AppError(
+          "The appointment changed while confirmation was processing. Please check its status.",
+          409,
+        );
+      }
+
+      await tx.appointmentStatusHistory.create({
+        data: {
+          appointmentId: appointment.id,
+          fromStatus: "PENDING",
+          toStatus: "CANCELLED",
+          reason: "CONFIRMATION_EXPIRED",
+        },
+      });
+
+      return {
+        outcome: "EXPIRED" as const,
+        appointmentId: appointment.id,
+      };
+    }
+
+    // Confirm only if the appointment is still pending
+    // and its hold is still valid at the time of the update.
+    const confirmed = await tx.appointment.updateMany({
+      where: {
+        id: appointment.id,
+        clinicId,
+        contactId,
+        status: "PENDING",
+        confirmationExpiresAt: { gt: now },
+      },
+      data: {
+        status: "CONFIRMED",
+      },
+    });
+
+    if (confirmed.count === 0) {
+      throw new AppError(
+        "The appointment changed while confirmation was processing. Please check its status.",
+        409,
+      );
+    }
+
+    await tx.appointmentStatusHistory.create({
+      data: {
+        appointmentId: appointment.id,
+        fromStatus: "PENDING",
+        toStatus: "CONFIRMED",
+        reason: "PATIENT_CONFIRMED",
+      },
+    });
+
+    return {
+      outcome: "CONFIRMED" as const,
+      appointmentId: appointment.id,
+    };
+  });
 }

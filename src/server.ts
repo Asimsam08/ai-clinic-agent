@@ -2,6 +2,7 @@ import "dotenv/config";
 import app from "./app.js";
 import { env } from "./config/env.js";
 import { checkDatabaseConnection } from "./db/check-db.js";
+import { startAppointmentExpiryJob } from "./jobs/appointment-expiry.jobs.js";
 
 // const PORT = process.env.PORT || 5000
 
@@ -20,6 +21,8 @@ async function startServer() {
 
     app.listen(env.port, () => {
       console.log(`Server running on http://localhost:${env.port}`);
+        startAppointmentExpiryJob
+        ();
     });
   } catch (error) {
     console.error("Failed to start server:", error);
